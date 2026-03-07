@@ -1,0 +1,25 @@
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# Virtual Environment
+venv/
+env/
+.env
+
+# Project specific
+.pytest_cache/
+weights/*.pth
+submissions/*.csv
+icdar-2026-circleid-pen-classification/
+outputs/
+checkpoints/
+
+# IDE files
+.vscode/
+.idea/
