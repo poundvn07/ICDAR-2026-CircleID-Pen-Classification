@@ -38,5 +38,4 @@ python scripts/make_submission.py
 ```
 
 ## Results
-- **Baseline (Random)**: 0.093 LB Score
-- **Stage 4 (ConvNeXt-Tiny)**: Validation Macro F1 ~ 0.7556
+- **Best Validation Macro F1 ~ 0.91917
