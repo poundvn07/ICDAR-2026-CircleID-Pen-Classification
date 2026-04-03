@@ -22,6 +22,8 @@ Professional implementation for the "ICDAR 2026 - CircleID: Pen Classification" 
 ```bash
 python3 -m venv venv
 source venv/bin/activate
+pip install -r requirements.txt
+# Or install manually:
 pip install torch torchvision timm albumentations pandas scikit-learn opencv-python tqdm
 ```
 
@@ -38,4 +40,4 @@ python scripts/make_submission.py
 ```
 
 ## Results
-- **Best Validation Macro F1 ~ 0.91917
+- **Best Validation Score:** Marco F1 ~ 0.91917
