@@ -30,7 +30,7 @@ class CFG:
     SEED = 42
     N_FOLDS = 3                  # 3 folds outperformed 5 folds (0.91806 vs 0.91750)
     NUM_CLASSES = 8
-    OUTPUT_DIR = "/kaggle/working"
+    OUTPUT_DIR = "submissions"
 
     # --- Optuna auto-tuning ---
     USE_OPTUNA = False           # Disabled — Optuna found worse params (0.91693 vs 0.91806)
@@ -64,44 +64,33 @@ class CFG:
 # DATA LOADING
 # ============================================================================
 def find_file(filename: str) -> Path:
-    """Search for a file in Kaggle paths (recursive), working dir, and CWD."""
+    """Search for a file in local directories, working dir, and CWD."""
     # Fast checks first
     quick = [
-        Path(f"/kaggle/input/shibal/{filename}"),
-        Path(f"/kaggle/working/{filename}"),
-        Path(f"/kaggle/input/{filename}"),
+        Path(f"icdar-2026-circleid-pen-classification/{filename}"),
+        Path(f"submissions/{filename}"),
+        Path(f"outputs/{filename}"),
+        Path(f"weights/{filename}"),
         Path(filename),
     ]
     for p in quick:
         if p.exists():
             return p
 
-    # Deep recursive search under /kaggle/input/ (covers any dataset structure)
-    kaggle_input = Path("/kaggle/input")
-    if kaggle_input.exists():
-        found = list(kaggle_input.rglob(filename))
-        if found:
-            print(f"  Found {filename} at: {found[0]}")
-            return found[0]
-
-    # Also try /kaggle/working/ recursively
-    kaggle_working = Path("/kaggle/working")
-    if kaggle_working.exists():
-        found = list(kaggle_working.rglob(filename))
-        if found:
-            print(f"  Found {filename} at: {found[0]}")
-            return found[0]
-
-    # Show what's available for debugging
-    if kaggle_input.exists():
-        print(f"\n⚠️  Cannot find '{filename}'. Available files in /kaggle/input/:")
-        for f in sorted(kaggle_input.rglob("*.csv")):
-            print(f"    {f}")
+    # Deep recursive search in the current project directory (skip virtual envs & gits)
+    for root, dirs, files in os.walk("."):
+        if ".git" in dirs: dirs.remove(".git")
+        if "venv" in dirs: dirs.remove("venv")
+        if "__pycache__" in dirs: dirs.remove("__pycache__")
+        
+        if filename in files:
+            p = Path(root) / filename
+            print(f"  Found {filename} at: {p}")
+            return p
 
     raise FileNotFoundError(
         f"Cannot find {filename}. Make sure the Level-1 outputs "
-        f"(oof_train_features.csv, test_features.csv) are saved to /kaggle/working/ "
-        f"or uploaded as a Kaggle dataset input."
+        f"(oof_train_features.csv, test_features.csv) and Kaggle CSVs are available locally."
     )
 
 
