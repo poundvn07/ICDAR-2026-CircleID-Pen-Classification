@@ -26,13 +26,18 @@ class PenClassifierHead(nn.Module):
         self.head = nn.Sequential(
             nn.LayerNorm(in_features),
             nn.Dropout(p=p_dropout),
-            nn.Linear(in_features, num_classes)
+            nn.Linear(in_features, in_features // 2),
+            nn.GELU(),
+            nn.Dropout(p=p_dropout * 0.5),
+            nn.Linear(in_features // 2, num_classes)
         )
 
-        # Initialize linear layer
-        nn.init.xavier_uniform_(self.head[2].weight)
-        if self.head[2].bias is not None:
-            nn.init.zeros_(self.head[2].bias)
+        # Initialize linear layers
+        for m in self.head.modules():
+            if isinstance(m, nn.Linear):
+                nn.init.xavier_uniform_(m.weight)
+                if m.bias is not None:
+                    nn.init.zeros_(m.bias)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass.

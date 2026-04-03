@@ -39,11 +39,13 @@ class CircleDataset(Dataset):
             - image_id (str): unique sample identifier
             - image_path (str): absolute path to image file
             - pen_id (int): label in [0, NUM_CLASSES)
-            - writer_id (int): writer group id (for GroupKFold)
+            - writer_id (str/int): writer group id (for GroupKFold)
         transform: Optional Albumentations Compose pipeline.
             If None, a default deterministic pipeline (resize + normalize +
             ToTensorV2) is applied.
         image_size: Target spatial dimension (default 224).
+        writer_id_map: Optional dict mapping writer_id string -> int index.
+            If None, a mapping is built automatically from annotations.
 
     Raises:
         ValueError: If annotations is empty.
@@ -56,6 +58,7 @@ class CircleDataset(Dataset):
         annotations: list[dict[str, Any]],
         transform: Optional[A.Compose] = None,
         image_size: int = DEFAULT_IMAGE_SIZE,
+        writer_id_map: Optional[dict[str, int]] = None,
     ) -> None:
         if not annotations:
             raise ValueError("annotations must be a non-empty list of records.")
@@ -70,6 +73,13 @@ class CircleDataset(Dataset):
 
         self._annotations = annotations
         self._image_size = image_size
+
+        # Build writer_id -> integer mapping for multi-task learning
+        if writer_id_map is not None:
+            self._writer_id_map = writer_id_map
+        else:
+            unique_writers = sorted(set(str(r["writer_id"]) for r in annotations))
+            self._writer_id_map = {wid: idx for idx, wid in enumerate(unique_writers)}
 
         if transform is not None:
             self._transform = transform
@@ -114,9 +124,16 @@ class CircleDataset(Dataset):
         # --- Label ---
         label = torch.tensor(record["pen_id"], dtype=torch.int64)  # scalar
 
+        # Writer label for multi-task learning
+        writer_label = torch.tensor(
+            self._writer_id_map.get(str(record["writer_id"]), 0),
+            dtype=torch.int64
+        )
+
         return {
             "image": image_tensor,
             "label": label,
             "writer_id": record["writer_id"],
+            "writer_label": writer_label,
             "image_id": record.get("image_id", ""),
         }

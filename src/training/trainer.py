@@ -1,7 +1,7 @@
 """Trainer module.
 
 Implements the training loop, validation loop, and tracking logic with
-support for Automatic Mixed Precision (AMP).
+support for Automatic Mixed Precision (AMP) and Multi-task Learning.
 """
 import torch
 import torch.nn as nn
@@ -20,7 +20,9 @@ class Trainer:
     Features:
     - Train / Eval epochs
     - Automatic Mixed Precision (AMP) via `torch.amp`
+    - Multi-task Learning support (pen + writer classification)
     - Metric aggregation and logging
+    - Best model checkpoint saving
     """
 
     def __init__(
@@ -30,7 +32,8 @@ class Trainer:
         criterion: nn.Module,
         device: torch.device,
         scheduler: Optional[Dict[str, Callable]] = None,
-        use_amp: bool = True
+        use_amp: bool = True,
+        save_path: Optional[str] = None,
     ):
         self.model = model.to(device)
         self.optimizer = optimizer
@@ -39,19 +42,48 @@ class Trainer:
         
         self.scheduler_cfg = scheduler
         self.use_amp = use_amp
+        self.save_path = save_path
+        
+        # Detect multi-task mode
+        self.multi_task = hasattr(model, 'writer_head') and model.writer_head is not None
         
         # Determine AMP scaler based on device
         self.scaler = None
         if self.use_amp:
             if self.device.type == 'cuda':
                 self.scaler = torch.amp.GradScaler('cuda')
-            elif self.device.type == 'mps':
-                # MPS currently doesn't implement or recommend GradScaler,
-                # as natively bfloat16 handles ranges well, but we set flag.
-                pass 
                 
         # History
         self.history = defaultdict(list)
+
+    def _get_amp_context(self):
+        """Return the appropriate autocast context."""
+        if self.use_amp and self.device.type in ('cuda', 'mps'):
+            device_type = self.device.type
+            dtype = torch.bfloat16 if device_type == 'mps' else torch.float16
+            return torch.autocast(device_type=device_type, dtype=dtype)
+        # Fallback: no-op context
+        import contextlib
+        return contextlib.nullcontext()
+    
+    def _compute_loss(self, model_output, batch):
+        """Compute loss for single or multi-task mode."""
+        labels = batch["label"].to(self.device)
+        
+        if self.multi_task and isinstance(model_output, tuple):
+            pen_logits, writer_logits = model_output
+            writer_labels = batch["writer_label"].to(self.device)
+            loss = self.criterion(pen_logits, labels, writer_logits, writer_labels)
+            return loss, pen_logits
+        else:
+            # Single-task or eval mode (model returns only pen_logits)
+            pen_logits = model_output
+            if self.multi_task:
+                # MultiTaskLoss handles missing writer args gracefully
+                loss = self.criterion(pen_logits, labels)
+            else:
+                loss = self.criterion(pen_logits, labels)
+            return loss, pen_logits
 
     def _train_epoch(self, dataloader: DataLoader) -> Dict[str, float]:
         self.model.train()
@@ -62,24 +94,12 @@ class Trainer:
         
         for batch in dataloader:
             images = batch["image"].to(self.device)
-            labels = batch["label"].to(self.device)
             
             self.optimizer.zero_grad(set_to_none=True)
             
-            # Forward pass with AMP
-            # the device_type kwarg handles cuda/cpu/mps context targeting
-            if self.use_amp and self.device.type in ('cuda', 'mps'):
-                # Note: bfloat16 is preferred for MPS but mps doesn't support torch.autocast natively in the same way yet.
-                # We use generic fallback:
-                device_type = self.device.type
-                dtype = torch.bfloat16 if device_type == 'mps' else torch .float16
-                
-                with torch.autocast(device_type=device_type, dtype=dtype):
-                    logits = self.model(images)
-                    loss = self.criterion(logits, labels)
-            else:
-                logits = self.model(images)
-                loss = self.criterion(logits, labels)
+            with self._get_amp_context():
+                model_output = self.model(images)
+                loss, pen_logits = self._compute_loss(model_output, batch)
                 
             # Backward and Optimize
             if self.scaler is not None:
@@ -95,10 +115,8 @@ class Trainer:
                 self.scheduler_cfg["scheduler"].step()
                 
             epoch_loss += loss.item()
-            
-            # Detach to free up VRAM
-            all_preds.append(logits.detach())
-            all_targets.append(labels.detach())
+            all_preds.append(pen_logits.detach())
+            all_targets.append(batch["label"].detach())
             
         # compute epoch metrics
         all_preds = torch.cat(all_preds, dim=0)
@@ -121,19 +139,13 @@ class Trainer:
             images = batch["image"].to(self.device)
             labels = batch["label"].to(self.device)
             
-            if self.use_amp and self.device.type in ('cuda', 'mps'):
-                device_type = self.device.type
-                dtype = torch.bfloat16 if device_type == 'mps' else torch.float16
-                with torch.autocast(device_type=device_type, dtype=dtype):
-                    logits = self.model(images)
-                    loss = self.criterion(logits, labels)
-            else:
-                logits = self.model(images)
-                loss = self.criterion(logits, labels)
+            with self._get_amp_context():
+                pen_logits = self.model(images)  # eval mode -> only pen_logits
+                loss = self.criterion(pen_logits, labels) if not self.multi_task else \
+                       self.criterion.pen_criterion(pen_logits, labels)
                 
             epoch_loss += loss.item()
-            
-            all_preds.append(logits.detach())
+            all_preds.append(pen_logits.detach())
             all_targets.append(labels.detach())
             
         all_preds = torch.cat(all_preds, dim=0)
@@ -142,13 +154,6 @@ class Trainer:
         metrics = compute_metrics(all_preds, all_targets)
         metrics["loss"] = epoch_loss / len(dataloader)
         
-        # Step the scheduler if it's epoch-based
-        if self.scheduler_cfg and self.scheduler_cfg.get("interval") == "epoch":
-            # Some schedulers like ReduceLROnPlateau need the validation loss
-            scheduler = self.scheduler_cfg["scheduler"]
-            if hasattr(scheduler, "step_with_metrics"):
-               pass # Not standard OneCycle
-               
         return metrics
 
     def fit(self, train_dl: DataLoader, val_dl: DataLoader, epochs: int) -> Dict[str, list]:
@@ -185,15 +190,18 @@ class Trainer:
             for k, v in val_metrics.items():
                 self.history[f"val_{k}"].append(v)
                 
-            # Log latest LR
-            current_lr = self.optimizer.param_groups[0]["lr"]
-            self.history["lr"].append(current_lr)
-            print(f"LR: {current_lr:.6e}")
+            # Log LR info
+            lrs = [f"{pg.get('name', f'g{i}')}: {pg['lr']:.2e}" 
+                   for i, pg in enumerate(self.optimizer.param_groups)]
+            self.history["lr"].append(self.optimizer.param_groups[-1]["lr"])
+            print(f"LR: {' | '.join(lrs)}")
             
-            # Keep track of best model loosely
+            # Save best model
             if val_metrics["macro_f1"] > best_val_f1:
-                print(f"🌟 New best validation F1: {val_metrics['macro_f1']:.4f} (improved from {best_val_f1:.4f})")
+                print(f"🌟 New best F1: {val_metrics['macro_f1']:.4f} (prev: {best_val_f1:.4f})")
                 best_val_f1 = val_metrics["macro_f1"]
-                # A full save_checkpoint method would go here
+                if self.save_path:
+                    torch.save(self.model.state_dict(), self.save_path)
+                    print(f"   Saved best model to {self.save_path}")
             
         return dict(self.history)

@@ -37,22 +37,12 @@ def get_train_transform(image_size: int = 224) -> A.Compose:
             p=0.5,
         ),
 
-        # --- Ink-safe color augmentation (AP-07: bounded jitter) ---
-        A.ColorJitter(
-            brightness=0.1,
-            contrast=0.1,
-            saturation=0.05,
-            hue=0.02,
-            p=0.3,
-        ),
-
-        # --- Light noise (bounded per ADR-002) ---
-        A.GaussNoise(
-            std_range=(0.02, 0.05),
-            mean_range=(0.0, 0.0),
-            p=0.2,
-        ),
-
+        # --- Ink-aware domain augmentations ---
+        A.CLAHE(clip_limit=(1, 4), p=0.3),
+        A.Sharpen(alpha=(0.2, 0.5), lightness=(0.5, 1.0), p=0.3),
+        A.RandomBrightnessContrast(brightness_limit=0.1, contrast_limit=0.15, p=0.3),
+        A.GaussianBlur(blur_limit=(3, 5), p=0.15),
+        
         # --- Coarse dropout for regularization ---
         A.CoarseDropout(
             num_holes_range=(1, 4),

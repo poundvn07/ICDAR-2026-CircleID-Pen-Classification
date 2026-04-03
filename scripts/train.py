@@ -1,14 +1,11 @@
 """Main Training script for ICDAR 2026 CircleID Pen Classification.
 
-This script orchestrates the pipeline:
-1. Load Data (GroupKFold with Writer Disjoint)
-2. Instantiate Model (ConvNeXt-Tiny from timm)
-3. Set up Training environment (Loss, Optimizer, AMP)
-4. Train and Validate
-5. Save Best Model
+Supports:
+- Multi-task Learning (auxiliary writer head)
+- Discriminative Learning Rates (backbone LR < head LR)
+- Multiple backbone architectures (ConvNeXt, SwinV2, EfficientNet)
 """
 import argparse
-import os
 import sys
 from pathlib import Path
 
@@ -21,9 +18,8 @@ import torch
 import pandas as pd
 
 from src.data.datamodule import CircleDataModule
-from src.data.utils import load_image
 from src.models.factory import create_model
-from src.training.losses import get_loss_fn
+from src.training.losses import get_loss_fn, MultiTaskLoss
 from src.training.optimizer import create_optimizer, create_scheduler
 from src.training.trainer import Trainer
 
@@ -38,6 +34,10 @@ def parse_args():
     parser.add_argument("--lr", type=float, default=1e-3)
     parser.add_argument("--model_name", type=str, default="convnext_tiny")
     parser.add_argument("--output_dir", type=str, default="./weights")
+    # Advanced techniques
+    parser.add_argument("--multi_task", action="store_true", help="Enable multi-task writer head")
+    parser.add_argument("--backbone_lr_factor", type=float, default=0.1,
+                        help="Backbone LR = lr * this factor (discriminative LR)")
     return parser.parse_args()
 
 
@@ -48,7 +48,7 @@ def main():
     out_dir = Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     
-    # 2. Select Device (MPS for Mac M-series, CUDA, or CPU)
+    # 2. Select Device
     if torch.backends.mps.is_available():
         device = torch.device("mps")
         print("Using MPS backend.")
@@ -62,6 +62,20 @@ def main():
     # 3. DataModule
     print("Loading DataModule...")
     df = pd.read_csv(args.csv_file)
+    
+    # --- Handle unknown writers (-1) by assigning pseudo-writer IDs ---
+    unknown_mask = df["writer_id"] == -1
+    if unknown_mask.any():
+        df.loc[unknown_mask, "writer_id"] = [
+            f"pseudo_{i}" for i in range(unknown_mask.sum())
+        ]
+        print(f"Assigned {unknown_mask.sum()} pseudo-writer IDs")
+
+    # Build writer_id -> int mapping from FULL dataset (before split)
+    unique_writers = sorted(df["writer_id"].unique())
+    writer_id_map = {str(wid): idx for idx, wid in enumerate(unique_writers)}
+    num_writers = len(writer_id_map)
+    print(f"Writers: {num_writers} unique")
     
     # Pre-process dataframe into list of dicts with absolute paths
     annotations = []
@@ -85,38 +99,54 @@ def main():
     print(f"Train batches: {len(train_dl)}, Val batches: {len(val_dl)}")
 
     # 4. Model Architecture
-    print(f"Creating Model ({args.model_name})...")
-    model = create_model(model_name=args.model_name, pretrained=True)
+    mt_writers = num_writers if args.multi_task else 0
+    print(f"Creating Model ({args.model_name}, multi_task={args.multi_task})...")
+    model = create_model(
+        model_name=args.model_name, 
+        pretrained=True,
+        num_writers=mt_writers
+    )
     
-    # 5. Training Components
-    criterion = get_loss_fn(label_smoothing=0.1)
+    # 5. Loss Function
+    if args.multi_task:
+        criterion = MultiTaskLoss(alpha=0.3, label_smoothing=0.1)
+        print("Using MultiTaskLoss (pen + writer)")
+    else:
+        criterion = get_loss_fn(label_smoothing=0.1)
     
-    optimizer = create_optimizer(model, lr=args.lr, weight_decay=0.05)
+    # 6. Optimizer (Discriminative LR)
+    print(f"Discriminative LR: backbone={args.lr * args.backbone_lr_factor:.1e}, "
+          f"heads={args.lr:.1e}")
+    optimizer = create_optimizer(
+        model, 
+        lr=args.lr, 
+        weight_decay=0.05,
+        backbone_lr_factor=args.backbone_lr_factor
+    )
     
     scheduler_cfg = create_scheduler(
         optimizer=optimizer,
         max_lr=args.lr,
         epochs=args.epochs,
-        steps_per_epoch=len(train_dl)
+        steps_per_epoch=len(train_dl),
+        backbone_lr_factor=args.backbone_lr_factor
     )
 
-    # 6. Trainer
+    # 7. Trainer
+    save_path = str(out_dir / f"{args.model_name}_fold{args.fold}.pth")
     trainer = Trainer(
         model=model,
         optimizer=optimizer,
         criterion=criterion,
         device=device,
         scheduler=scheduler_cfg,
-        use_amp=True
+        use_amp=True,
+        save_path=save_path
     )
 
     print("Starting training...")
     history = trainer.fit(train_dl, val_dl, epochs=args.epochs)
-    
-    # 7. Save model
-    save_path = out_dir / f"{args.model_name}_fold{args.fold}.pth"
-    torch.save(model.state_dict(), save_path)
-    print(f"Training complete. Weights saved to {save_path}")
+    print(f"\nTraining complete. Best model saved to {save_path}")
 
 
 if __name__ == "__main__":
