@@ -40,4 +40,6 @@ python scripts/make_submission.py
 ```
 
 ## Results
-- **Best Validation Score:** Marco F1 ~ 0.91917
+**Best Validation Score:**
+- Public: F1 ~ 0.91917
+- Private: F1 ~ 0.90561  
